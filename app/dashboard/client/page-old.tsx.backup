@@ -1,0 +1,292 @@
+import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import Link from 'next/link'
+import DashboardLayout from '@/components/dashboard/DashboardLayout'
+import StatsCard from '@/components/dashboard/StatsCard'
+import ProfileCompletionWidget from '@/components/dashboard/ProfileCompletionWidget'
+import ProjectCard from '@/components/dashboard/ProjectCard'
+import ProposalCard from '@/components/dashboard/ProposalCard'
+import Card from '@/components/ui/Card'
+import Button from '@/components/ui/Button'
+import {
+  BriefcaseIcon,
+  UserGroupIcon,
+  CurrencyDollarIcon,
+} from '@heroicons/react/24/outline'
+
+export default async function ClientDashboard() {
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect('/auth/signin')
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', user.id)
+    .single()
+
+  if (profile?.role !== 'client') {
+    redirect(`/dashboard/${profile?.role || 'freelancer'}`)
+  }
+
+  // Fetch client profile data
+  const { data: clientProfile } = await supabase
+    .from('client_profiles')
+    .select('*')
+    .eq('id', user.id)
+    .single()
+
+  // Fetch client's projects
+  const { data: projects } = await supabase
+    .from('projects')
+    .select('*, proposals(count)')
+    .eq('client_id', user.id)
+    .order('created_at', { ascending: false })
+    .limit(5)
+
+  // Count active projects
+  const { count: activeProjectsCount } = await supabase
+    .from('projects')
+    .select('*', { count: 'only', head: true })
+    .eq('client_id', user.id)
+    .in('status', ['open', 'in_progress', 'in_review'])
+
+  // Count hired freelancers (unique freelancers in active projects)
+  const { data: hiredFreelancers } = await supabase
+    .from('projects')
+    .select('freelancer_id')
+    .eq('client_id', user.id)
+    .not('freelancer_id', 'is', null)
+    .in('status', ['in_progress', 'in_review'])
+
+  const uniqueFreelancersCount = new Set(hiredFreelancers?.map(p => p.freelancer_id)).size
+
+  // Calculate total spent (from completed projects)
+  const { data: completedProjects } = await supabase
+    .from('projects')
+    .select('budget_max')
+    .eq('client_id', user.id)
+    .eq('status', 'completed')
+    .eq('payment_status', 'paid')
+
+  const totalSpent = completedProjects?.reduce((sum, p) => sum + (p.budget_max || 0), 0) || 0
+
+  // Fetch recent proposals on client's projects
+  const { data: recentProposals } = await supabase
+    .from('proposals')
+    .select(`
+      *,
+      projects!inner (
+        id,
+        title,
+        client_id
+      ),
+      profiles!proposals_freelancer_id_fkey (
+        id,
+        full_name
+      ),
+      freelancer_profiles (
+        avatar_url
+      )
+    `)
+    .eq('projects.client_id', user.id)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(5)
+
+  // Profile completion check
+  const profileCompletionItems = [
+    { label: 'Add company name', completed: !!clientProfile?.company_name },
+    { label: 'Add company description', completed: !!clientProfile?.company_description },
+    { label: 'Add company website', completed: !!clientProfile?.company_website },
+    { label: 'Upload company logo', completed: !!clientProfile?.avatar_url },
+  ]
+
+  const handleSignOut = async () => {
+    'use server'
+    const supabase = await createClient()
+    await supabase.auth.signOut()
+    redirect('/auth/signin')
+  }
+
+  return (
+    <DashboardLayout
+      userName={profile?.full_name || user.email || 'User'}
+      userRole="client"
+      onSignOut={handleSignOut}
+    >
+      {/* Stats Cards */}
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 mb-8">
+        <StatsCard
+          title="Active Projects"
+          value={activeProjectsCount || 0}
+          subtitle={activeProjectsCount ? 'Projects in progress' : 'No active projects yet'}
+          icon={<BriefcaseIcon className="w-6 h-6" />}
+          color="primary"
+          delay={0}
+        />
+
+        <StatsCard
+          title="Hired Freelancers"
+          value={uniqueFreelancersCount || 0}
+          subtitle={uniqueFreelancersCount ? 'Working on your projects' : 'Start hiring talent'}
+          icon={<UserGroupIcon className="w-6 h-6" />}
+          color="success"
+          delay={0.1}
+        />
+
+        <StatsCard
+          title="Total Spent"
+          value={`$${totalSpent.toLocaleString()}`}
+          subtitle={completedProjects?.length ? `On ${completedProjects.length} completed projects` : 'No expenses yet'}
+          icon={<CurrencyDollarIcon className="w-6 h-6" />}
+          color="warning"
+          delay={0.2}
+        />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-3 mb-8">
+        {/* Main content - 2 columns */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Your Projects */}
+          <Card>
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="text-xl font-semibold">Your Projects</h3>
+                <p className="text-sm text-gray-600">Manage your posted projects</p>
+              </div>
+              <Link href="/dashboard/client/projects/new">
+                <Button variant="primary" size="sm">Post a Project</Button>
+              </Link>
+            </div>
+            <div className="space-y-4">
+              {projects && projects.length > 0 ? (
+                projects.map((project, index) => (
+                  <ProjectCard
+                    key={project.id}
+                    id={project.id}
+                    title={project.title}
+                    description={project.description}
+                    budgetMin={project.budget_min}
+                    budgetMax={project.budget_max}
+                    deadline={project.deadline}
+                    requiredSkills={project.required_skills}
+                    status={project.status}
+                    // @ts-ignore
+                    proposalsCount={project.proposals?.[0]?.count || 0}
+                    userRole="client"
+                    postedAt={project.created_at}
+                    delay={index * 0.1}
+                  />
+                ))
+              ) : (
+                <p className="text-gray-600 text-center py-8">
+                  You haven't posted any projects yet. Create your first project to find freelancers!
+                </p>
+              )}
+            </div>
+          </Card>
+
+          {/* Recent Proposals */}
+          {recentProposals && recentProposals.length > 0 && (
+            <Card>
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <h3 className="text-xl font-semibold">Pending Proposals</h3>
+                  <p className="text-sm text-gray-600">Review freelancer applications</p>
+                </div>
+                <Link href="/dashboard/client/proposals">
+                  <Button variant="ghost" size="sm">View All</Button>
+                </Link>
+              </div>
+              <div className="space-y-4">
+                {recentProposals.map((proposal, index) => (
+                  <ProposalCard
+                    key={proposal.id}
+                    id={proposal.id}
+                    // @ts-ignore
+                    projectTitle={proposal.projects?.title || 'Unknown Project'}
+                    // @ts-ignore
+                    projectId={proposal.projects?.id}
+                    // @ts-ignore
+                    freelancerName={proposal.profiles?.full_name || 'Unknown Freelancer'}
+                    freelancerId={proposal.freelancer_id}
+                    // @ts-ignore
+                    avatarUrl={proposal.freelancer_profiles?.avatar_url}
+                    proposedBudget={proposal.proposed_budget}
+                    estimatedDuration={proposal.estimated_duration}
+                    coverLetter={proposal.cover_letter}
+                    status={proposal.status}
+                    createdAt={proposal.created_at}
+                    userRole="client"
+                    delay={index * 0.1}
+                  />
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
+
+        {/* Sidebar - 1 column */}
+        <div className="space-y-6">
+          {/* Profile Completion */}
+          <ProfileCompletionWidget
+            items={profileCompletionItems}
+            userRole="client"
+          />
+
+          {/* Quick Stats */}
+          <Card className="border-2 border-gray-100">
+            <h3 className="text-lg font-semibold mb-4">Overview</h3>
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Total Projects</span>
+                <span className="font-bold text-gray-900">{clientProfile?.total_projects_posted || 0}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Open Projects</span>
+                <span className="font-bold text-emerald-600">
+                  {projects?.filter(p => p.status === 'open').length || 0}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">In Progress</span>
+                <span className="font-bold text-amber-600">
+                  {projects?.filter(p => p.status === 'in_progress').length || 0}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Completed</span>
+                <span className="font-bold text-blue-600">
+                  {projects?.filter(p => p.status === 'completed').length || 0}
+                </span>
+              </div>
+            </div>
+          </Card>
+
+          {/* Quick Action */}
+          <Card className="bg-gradient-to-br from-emerald-50 to-green-50 border-2 border-emerald-200">
+            <div className="text-center space-y-3">
+              <div className="text-4xl mb-2">🚀</div>
+              <h4 className="font-bold text-gray-900">Need help?</h4>
+              <p className="text-sm text-gray-600">
+                Post a project and get proposals from talented freelancers in minutes
+              </p>
+              <Link href="/dashboard/client/projects/new">
+                <Button variant="primary" className="w-full">
+                  Post Your First Project
+                </Button>
+              </Link>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </DashboardLayout>
+  )
+}

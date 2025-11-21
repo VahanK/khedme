@@ -1,0 +1,279 @@
+import { createClient } from '@/lib/supabase/server'
+import { redirect } from 'next/navigation'
+import Link from 'next/link'
+import DashboardLayout from '@/components/dashboard/DashboardLayout'
+import StatsCard from '@/components/dashboard/StatsCard'
+import ProfileCompletionWidget from '@/components/dashboard/ProfileCompletionWidget'
+import ProjectCard from '@/components/dashboard/ProjectCard'
+import ProposalCard from '@/components/dashboard/ProposalCard'
+import Card from '@/components/ui/Card'
+import Button from '@/components/ui/Button'
+import {
+  BriefcaseIcon,
+  DocumentTextIcon,
+  CurrencyDollarIcon,
+} from '@heroicons/react/24/outline'
+
+export default async function FreelancerDashboard() {
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect('/auth/signin')
+  }
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', user.id)
+    .single()
+
+  if (profile?.role !== 'freelancer') {
+    redirect(`/dashboard/${profile?.role || 'client'}`)
+  }
+
+  // Fetch freelancer profile data
+  const { data: freelancerProfile } = await supabase
+    .from('freelancer_profiles')
+    .select('*')
+    .eq('id', user.id)
+    .single()
+
+  // Fetch proposals
+  const { data: proposals } = await supabase
+    .from('proposals')
+    .select(`
+      *,
+      projects (
+        title,
+        client_id,
+        profiles!projects_client_id_fkey (
+          full_name
+        )
+      )
+    `)
+    .eq('freelancer_id', user.id)
+    .order('created_at', { ascending: false })
+    .limit(5)
+
+  // Count active projects
+  const { count: activeProjectsCount } = await supabase
+    .from('projects')
+    .select('*', { count: 'only', head: true })
+    .eq('freelancer_id', user.id)
+    .in('status', ['in_progress', 'in_review'])
+
+  // Count proposals by status
+  const { count: pendingProposalsCount } = await supabase
+    .from('proposals')
+    .select('*', { count: 'only', head: true })
+    .eq('freelancer_id', user.id)
+    .eq('status', 'pending')
+
+  const { count: acceptedProposalsCount } = await supabase
+    .from('proposals')
+    .select('*', { count: 'only', head: true })
+    .eq('freelancer_id', user.id)
+    .eq('status', 'accepted')
+
+  // Calculate total earnings (from completed projects)
+  const { data: completedProjects } = await supabase
+    .from('projects')
+    .select('budget_max')
+    .eq('freelancer_id', user.id)
+    .eq('status', 'completed')
+    .eq('payment_status', 'paid')
+
+  const totalEarnings = completedProjects?.reduce((sum, p) => sum + (p.budget_max || 0), 0) || 0
+
+  // Fetch available projects (open projects, not already applied to)
+  const { data: appliedProjectIds } = await supabase
+    .from('proposals')
+    .select('project_id')
+    .eq('freelancer_id', user.id)
+
+  const appliedIds = appliedProjectIds?.map(p => p.project_id) || []
+
+  const { data: availableProjects } = await supabase
+    .from('projects')
+    .select(`
+      *,
+      profiles!projects_client_id_fkey (
+        full_name
+      )
+    `)
+    .eq('status', 'open')
+    .not('id', 'in', `(${appliedIds.length > 0 ? appliedIds.join(',') : 'null'})`)
+    .order('created_at', { ascending: false })
+    .limit(3)
+
+  // Profile completion check
+  const profileCompletionItems = [
+    { label: 'Add profile bio', completed: !!freelancerProfile?.bio },
+    { label: 'Add skills', completed: !!freelancerProfile?.skills && freelancerProfile.skills.length > 0 },
+    { label: 'Set hourly rate', completed: !!freelancerProfile?.hourly_rate },
+    { label: 'Add portfolio URL', completed: !!freelancerProfile?.portfolio_url },
+    { label: 'Upload avatar', completed: !!freelancerProfile?.avatar_url },
+  ]
+
+  const handleSignOut = async () => {
+    'use server'
+    const supabase = await createClient()
+    await supabase.auth.signOut()
+    redirect('/auth/signin')
+  }
+
+  return (
+    <DashboardLayout
+      userName={profile?.full_name || user.email || 'User'}
+      userRole="freelancer"
+      onSignOut={handleSignOut}
+    >
+      {/* Stats Cards */}
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 mb-8">
+        <StatsCard
+          title="Active Projects"
+          value={activeProjectsCount || 0}
+          subtitle={activeProjectsCount ? 'Keep up the great work!' : 'No active projects yet'}
+          icon={<BriefcaseIcon className="w-6 h-6" />}
+          color="primary"
+          delay={0}
+        />
+
+        <StatsCard
+          title="Proposals"
+          value={`${pendingProposalsCount || 0} pending`}
+          subtitle={`${acceptedProposalsCount || 0} accepted`}
+          icon={<DocumentTextIcon className="w-6 h-6" />}
+          color="warning"
+          delay={0.1}
+        />
+
+        <StatsCard
+          title="Total Earnings"
+          value={`$${totalEarnings.toLocaleString()}`}
+          subtitle={completedProjects?.length ? `From ${completedProjects.length} completed projects` : 'Complete projects to earn'}
+          icon={<CurrencyDollarIcon className="w-6 h-6" />}
+          color="success"
+          delay={0.2}
+        />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-3 mb-8">
+        {/* Main content - 2 columns */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Available Projects */}
+          <Card>
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h3 className="text-xl font-semibold">Available Projects</h3>
+                <p className="text-sm text-gray-600">Browse and apply to projects</p>
+              </div>
+              <Link href="/dashboard/freelancer/projects">
+                <Button variant="outline" size="sm">Browse All</Button>
+              </Link>
+            </div>
+            <div className="space-y-4">
+              {availableProjects && availableProjects.length > 0 ? (
+                availableProjects.map((project, index) => (
+                  <ProjectCard
+                    key={project.id}
+                    id={project.id}
+                    title={project.title}
+                    description={project.description}
+                    budgetMin={project.budget_min}
+                    budgetMax={project.budget_max}
+                    deadline={project.deadline}
+                    requiredSkills={project.required_skills}
+                    status={project.status}
+                    userRole="freelancer"
+                    // @ts-ignore
+                    clientName={project.profiles?.full_name || 'Unknown Client'}
+                    postedAt={project.created_at}
+                    delay={index * 0.1}
+                  />
+                ))
+              ) : (
+                <p className="text-gray-600 text-center py-8">
+                  No projects available at the moment. Check back later!
+                </p>
+              )}
+            </div>
+          </Card>
+
+          {/* Recent Proposals */}
+          {proposals && proposals.length > 0 && (
+            <Card>
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <h3 className="text-xl font-semibold">Recent Proposals</h3>
+                  <p className="text-sm text-gray-600">Track your submitted proposals</p>
+                </div>
+                <Link href="/dashboard/freelancer/proposals">
+                  <Button variant="ghost" size="sm">View All</Button>
+                </Link>
+              </div>
+              <div className="space-y-4">
+                {proposals.map((proposal, index) => (
+                  <ProposalCard
+                    key={proposal.id}
+                    id={proposal.id}
+                    // @ts-ignore
+                    projectTitle={proposal.projects?.title || 'Unknown Project'}
+                    projectId={proposal.project_id}
+                    proposedBudget={proposal.proposed_budget}
+                    estimatedDuration={proposal.estimated_duration}
+                    coverLetter={proposal.cover_letter}
+                    status={proposal.status}
+                    createdAt={proposal.created_at}
+                    userRole="freelancer"
+                    delay={index * 0.1}
+                  />
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
+
+        {/* Sidebar - 1 column */}
+        <div className="space-y-6">
+          {/* Profile Completion */}
+          <ProfileCompletionWidget
+            items={profileCompletionItems}
+            userRole="freelancer"
+          />
+
+          {/* Quick Stats */}
+          <Card className="border-2 border-gray-100">
+            <h3 className="text-lg font-semibold mb-4">Your Stats</h3>
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Completed Projects</span>
+                <span className="font-bold text-gray-900">{freelancerProfile?.completed_projects || 0}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Rating</span>
+                <span className="font-bold text-amber-600">
+                  ⭐ {freelancerProfile?.rating?.toFixed(1) || '0.0'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Total Reviews</span>
+                <span className="font-bold text-gray-900">{freelancerProfile?.total_reviews || 0}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-600">Hourly Rate</span>
+                <span className="font-bold text-emerald-600">
+                  ${freelancerProfile?.hourly_rate || 'Not set'}
+                </span>
+              </div>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </DashboardLayout>
+  )
+}
